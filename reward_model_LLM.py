@@ -403,31 +403,68 @@ class RewardModel:
         for mb in range(self.mb_size):
 
             data = {
-                "model": "gpt-3.5-turbo",
-                "messages" : [
-                    {
-                        "role": "system",
-                        "content": f"You are a helpful and honest judge of good tasking and progress for AI agent in DMControl ButtonPress RL environment. Always answer as helpfully as possible, while being truthful.\
-                        If you don't know the answer to a question, please don't share false information and just return -1.
-                        
-                        I'm looking to have you evalute a buttonpress task in the DMControl RL environment.
-                        Your role will be to assess which actions are more efficient to achieving good score in RL environment.
-                        
-                        The basic information for the evaluation is as follows. 
-                         - Environment : ButtonPress -v2 metaworld 
-                         - Task Objective : Control robot arm to press button.
-                         - Trajectory : 
-                        
-                        I plan to inform you about the status and actions of the agent in a "
+                "model": "gpt-4o",
+                "messages" : [{
+                    "role": "system",
+                    "content":
+                    '''
+                    You are a helpful and honest judge of good tasking and progress for AI agent in DMControl ButtonPress RL environment. Always answer as helpfully as possible, while being truthful.
+                    If you don't know the answer to a question, please don't share false information. \n
+                    I'm looking to have you evalute a buttonpress task in the DMControl RL environment.
+                    Your role will be to assess which actions are more efficient to achieving good score in given RL environment.
+                    \n \
+                    The basic information for the evaluation is as follows. \n
+                        - Environment : ButtonPress -v2 metaworld \n
+                        - Task Description : Instruct the robot to press a button located along the y-axis, requiring precise positioning and force application. \n
+                        - Task Objective : Control robot arm to press button. \n
+                        - The Pythonic class-like environment abstraction is : \n
+                    class SawyerButtonPressEnvV2(gym.Env): \n
+                        def __init__(self): \n
+                            self.robot: Robot # the Sawyer robot in the environment \n
+                            self.button: RigidObject # the button object in the environment \n
+                            self.goal_position: np.ndarray[(3,)] # 3D position of the goal (button pressed position) \n
+                            self.trajectory: Trajectory # stores the trajectory of the episode \n
+                        def reset(self) -> np.ndarray: \n
+                            # Reset the environment and return initial observation \n
+                        def step(self, action: np.ndarray) -> tuple: \n
+                            # Perform one step and return (observation, reward, done, info) \n
+                        def get_trajectory(self) -> Trajectory: \n
+                            # Return the recorded trajectory \n
+                    class Robot: \n
+                        def __init__(self): \n
+                            self.ee_position: np.ndarray[(3,)] # 3D position of the end-effector \n
+                            self.joint_positions: np.ndarray[(7,)] # 7 joint positions of Sawyer robot \n
+                            self.joint_velocities: np.ndarray[(7,)] # 7 joint velocities of Sawyer robot \n
+                    class RigidObject: \n
+                        def __init__(self): \n
+                            self.position: np.ndarray[(3,)] # 3D position of the object (button) \n
+                            self.quaternion: np.ndarray[(4,)] # quaternion of the object (button) \n
+                    class Trajectory: \n
+                        def __init__(self, max_length=25): \n
+                            self.states: deque # queue of states, max length 25 \n
+                            self.actions: deque # queue of actions, max length 25 \n
+                            self.observations: deque # queue of observations, max length 25 \n
+                        def add_step(self, state: dict, action: np.ndarray, observation: np.ndarray): \n
+                            # Add a step to the trajectory \n
+                        def __len__(self) -> int: \n
+                            # Return the number of steps in the trajectory \n
+                    class State: \n
+                        def __init__(self): \n
+                            self.robot: Robot # state of the robot \n
+                            self.button: RigidObject # state of the button \n
+                    \n
+                
+                    I plan to inform you about two robot trajectories within the above environment, then please choose which one is better. You will also recieve reward sum which was predicted by current reward predictor.
+                    You MUST return short answer 0, 1 or -1 for all given samples. (Return results with seperated by comma. For example, 1,0,-1,0, ... )
+                    If first one is better then please return 0, If second one is better then please return 1, If there is no specific difference between two trajectories then just return -1.
+                    You can return -1 if there is no difference between two trajectory reward. I will inform you how threshold of this difference is."
+                    '''
                     },
                     {
-                        "role": "user",
-                        "content": f"First reward array is {np.array2string(r_t_1[mb], precision=5)}. \
-                        Second reward array is {np.array2string(r_t_2[mb], precision=5)}. \
-                        Please return one good preference feedbacks for teach the agent."
-                    },   
-                ],
-                "temperature": 0.3
+                    "role": "user",
+                    "content": (self.prompt_generator(sa_t_1, sa_t_2, sum_r_t_1, sum_r_t_2) + f"If you think reward difference is under {self.teacher_thres_equal}, then feedback should be prefered eqaully. Please return 0, 1 or -1 feedbacks for all {self.mb_size} samples to teach the agent. You MUST return exactly {self.mb_size} of feedbacks.")
+                    }],
+                "temperature": 0
             }
 
             response = requests.post(
@@ -448,40 +485,6 @@ class RewardModel:
             labels_list.append(int(feedbacks_string))
 
         labels = np.array(labels_list, dtype=int).reshape(-1,1)
-
-        '''
-        # equally preferable
-        margin_index = (np.abs(sum_r_t_1 - sum_r_t_2) < self.teacher_thres_equal).reshape(-1)
-        
-        # perfectly rational
-        seg_size = r_t_1.shape[1]
-        temp_r_t_1 = r_t_1.copy()
-        temp_r_t_2 = r_t_2.copy()
-        for index in range(seg_size-1):
-            temp_r_t_1[:,:index+1] *= self.teacher_gamma
-            temp_r_t_2[:,:index+1] *= self.teacher_gamma
-        sum_r_t_1 = np.sum(temp_r_t_1, axis=1)
-        sum_r_t_2 = np.sum(temp_r_t_2, axis=1)
-            
-        rational_labels = 1*(sum_r_t_1 < sum_r_t_2)
-        if self.teacher_beta > 0: # Bradley-Terry rational model
-            r_hat = torch.cat([torch.Tensor(sum_r_t_1), 
-                               torch.Tensor(sum_r_t_2)], axis=-1)
-            r_hat = r_hat*self.teacher_beta
-            ent = F.softmax(r_hat, dim=-1)[:, 1]
-            labels = torch.bernoulli(ent).int().numpy().reshape(-1, 1)
-        else:
-            labels = rational_labels
-        
-        # making a mistake
-        len_labels = labels.shape[0]
-        rand_num = np.random.rand(len_labels)
-        noise_index = rand_num <= self.teacher_eps_mistake
-        labels[noise_index] = 1 - labels[noise_index]
-
-        # equally preferable
-        labels[margin_index] = -1 
-        '''
 
         return sa_t_1, sa_t_2, r_t_1, r_t_2, labels
     
